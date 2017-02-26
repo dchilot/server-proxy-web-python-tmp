@@ -1,4 +1,5 @@
-var gLastEvent = ""
+var gLastEvent = {}
+gLastEvent["KEYBOARD"] = ""
 var gConn = null;
 
 $( document ).ready(
@@ -12,8 +13,38 @@ $( document ).ready(
 			console.log('Connected.');
 		};
 		gConn.onmessage = function(e) {
-			console.log('Received: ' + e.data);
 			obj = JSON.parse(e.data);
+			if ("new_items" in obj) {
+				console.log('Received: ' + e.data);
+				var list = document.getElementById("items");
+				for (var i = 0; i < obj.new_items.length; i++) {
+					name = obj.new_items[i];
+					identifier = "item " + name;
+					if (null == document.getElementById(identifier) ) {
+						console.log('add item with name "' + name + '"');
+						var entry = document.createElement('li');
+						entry.appendChild(document.createTextNode(name));
+						entry.id = identifier;
+						list.appendChild(entry);
+					}
+				}
+			}
+			if ("items" in obj) {
+				var list = document.getElementById("items");
+				for (var i = 0; i < obj.items.length; i++) {
+					item = obj.items[i];
+					identifier = "item " + item.name;
+					node_item = document.getElementById(identifier);
+					if (null == node_item) {
+						console.log("Error for item number " + i + " with id '" + identifier + "'.");
+					} else {
+						node_item.innerHTML = item.status
+					}
+				}
+			}
+			if ("capture_status" in obj) {
+				document.getElementById("capture_status").innerHTML = obj.capture_status;
+			}
 			if ("status" in obj) {
 				document.getElementById("status").innerHTML = obj.status;
 			}
@@ -70,12 +101,12 @@ $( document ).ready(
 				}
 				if ("" != newEvent)
 				{
-					if (newEvent != gLastEvent)
+					if (newEvent != gLastEvent["KEYBOARD"])
 					{
 						$("#textField").html(newEvent);
 						//console.log(newEvent)
 						callServer(newEvent)
-						gLastEvent = newEvent
+						gLastEvent["KEYBOARD"] = newEvent
 					}
 				}
 			}
@@ -83,11 +114,11 @@ $( document ).ready(
 		$( document ).keyup(
 			function(event)
 			{
-				if ("STOP" != gLastEvent)
+				if ("STOP" != gLastEvent["KEYBOARD"])
 				{
 					//console.log("STOP")
 					callServer("STOP")
-					gLastEvent = "STOP"
+					gLastEvent["KEYBOARD"] = "STOP"
 				}
 			}
 		);
@@ -98,4 +129,165 @@ $( document ).ready(
 function callServer(data)
 {
 	gConn.send(data);
+}
+
+///////////////////////
+// joystick handling //
+///////////////////////
+
+var haveEvents = 'ongamepadconnected' in window;
+var controllers = {};
+
+function connecthandler(e) {
+	addgamepad(e.gamepad);
+}
+
+function addgamepad(gamepad) {
+	controllers[gamepad.index] = gamepad;
+
+	var d = document.createElement("div");
+	d.setAttribute("id", "controller" + gamepad.index);
+
+	var t = document.createElement("h1");
+	t.appendChild(document.createTextNode("gamepad: " + gamepad.id));
+	d.appendChild(t);
+
+	gLastEvent[gamepad.index] = ""
+	callServer("new_joystick" + gamepad.index + " " + gamepad.id)
+
+	var b = document.createElement("div");
+	b.className = "buttons";
+
+	console.log('add buttons ; number: ' + gamepad.buttons.length);
+	for (var i = 0; i < gamepad.buttons.length; i++) {
+		var e = document.createElement("span");
+		e.className = "button";
+		//e.id = "b" + i;
+		e.innerHTML = i;
+		b.appendChild(e);
+	}
+
+	d.appendChild(b);
+
+	var a = document.createElement("div");
+	a.className = "axes";
+
+	for (var i = 0; i < gamepad.axes.length; i++) {
+		var p = document.createElement("progress");
+		p.className = "axis";
+		//p.id = "a" + i;
+		p.setAttribute("max", "2");
+		p.setAttribute("value", "1");
+		p.innerHTML = i;
+		a.appendChild(p);
+	}
+
+	d.appendChild(a);
+
+	// See https://github.com/luser/gamepadtest/blob/master/index.html
+	var start = document.getElementById("start");
+	if (start) {
+		start.style.display = "none";
+	}
+
+	document.body.appendChild(d);
+	requestAnimationFrame(updateStatus);
+}
+
+function disconnecthandler(e) {
+	removegamepad(e.gamepad);
+}
+
+function removegamepad(gamepad) {
+	var d = document.getElementById("controller" + gamepad.index);
+	document.body.removeChild(d);
+	delete controllers[gamepad.index];
+}
+
+function updateStatus() {
+	if (!haveEvents) {
+		scangamepads();
+	}
+
+	var i = 0;
+	var j;
+
+	for (j in controllers) {
+		var controller = controllers[j];
+		var d = document.getElementById("controller" + j);
+		var buttons = d.getElementsByClassName("button");
+		var newEvent = "";
+
+		for (i = 0; i < controller.buttons.length; i++) {
+			var b = buttons[i];
+			var val = controller.buttons[i];
+			var pressed = val == 1.0;
+			if (typeof(val) == "object") {
+				pressed = val.pressed;
+				val = val.value;
+			}
+			if ("" != newEvent) {
+				newEvent += ";";
+			}
+			var value = 0;
+			if (pressed) {
+				value = val;
+			}
+			newEvent += "b" + i + "=" + value;
+
+			var pct = Math.round(val * 100) + "%";
+			b.style.backgroundSize = pct + " " + pct;
+
+			if (pressed) {
+				b.className = "button pressed";
+			} else {
+				b.className = "button";
+			}
+		}
+
+		var axes = d.getElementsByClassName("axis");
+		for (i = 0; i < controller.axes.length; i++) {
+			var a = axes[i];
+			a.innerHTML = i + ": " + controller.axes[i].toFixed(4);
+			a.setAttribute("value", controller.axes[i] + 1);
+			if ("" != newEvent) {
+				newEvent += ";";
+			}
+			newEvent += "a" + i + "=" + controller.axes[i];
+		}
+		if ("" != newEvent)
+		{
+			newEvent = "joystick" + j + " " + newEvent
+			if (newEvent != gLastEvent[j])
+			{
+				$("#textField").html(newEvent);
+				callServer(newEvent);
+				gLastEvent[j] = newEvent;
+			}
+		}
+	}
+
+	requestAnimationFrame(updateStatus);
+}
+
+function scangamepads() {
+	var gamepads = navigator.getGamepads ? navigator.getGamepads() : (navigator.webkitGetGamepads ? navigator.webkitGetGamepads() : []);
+	for (var i = 0; i < gamepads.length; i++) {
+		if (gamepads[i]) {
+			if (gamepads[i].index in controllers) {
+				controllers[gamepads[i].index] = gamepads[i];
+			} else {
+				addgamepad(gamepads[i]);
+			}
+		}
+	}
+}
+
+
+window.addEventListener("gamepadconnected", connecthandler);
+window.addEventListener("gamepaddisconnected", disconnecthandler);
+
+if (!haveEvents) {
+	console.log("We do not have events");
+	setInterval(scangamepads, 100);
 }
