@@ -25,6 +25,8 @@ import sockjs.tornado
 
 import orwell.messages.controller_pb2 as pb_controller
 import orwell.messages.server_game_pb2 as pb_server_game
+import orwell.proxy.input
+import orwell.proxy.item
 
 RANDOM = random.Random()
 RANDOM.seed(42)
@@ -32,6 +34,8 @@ RANDOM.seed(42)
 
 class MainHandler(tornado.web.RequestHandler):
     handler = None
+    JOYSTICK_PREFIX = "joystick"
+    JOYSTICK_CREATE = "new_joystick"
 
     def initialize(self):
         # import ipdb; ipdb.set_trace()
@@ -52,12 +56,20 @@ class MainHandler(tornado.web.RequestHandler):
         self._subscribe_stream.on_recv(self._handle_message_parts)
         self._routing_id = "temporary_id_" + str(RANDOM.randint(0, 32768))
         MainHandler.handler = self
+        self._invert_direction = 1.0
+        self._joysticks = {}
+        self._last_right = None
+        self._last_left = None
+        self._last_fire_weapon1 = None
+        self._last_fire_weapon2 = None
+        self._items = set()
 
     @tornado.web.asynchronous
     def get(self):
         content = self._loader.load("index.html").generate(
                 videofeed="/test",
-                status="well let's say pending")
+                status="well let's say pending",
+                capture_status="")
         self.write(content)
         hello = self._build_hello()
         print("Send Hello: " + repr(hello))
@@ -80,6 +92,8 @@ class MainHandler(tornado.web.RequestHandler):
                 self._handle_goodbye(payload)
             elif ("GameState" == message_type):
                 self._handle_game_state(payload)
+            elif ("PlayerState" == message_type):
+                self._handle_player_state(payload)
             else:
                 print("Message ignored: " + message_type)
 
@@ -125,20 +139,56 @@ class MainHandler(tornado.web.RequestHandler):
         self.finish()
 
     def _handle_game_state(self, payload):
-        message = pb_server_game.GameState()
-        message.ParseFromString(payload)
-        if (message.HasField("winner")):
-            status = "Game won by team " + message.winner
-        else:
-            if (message.playing):
-                status = "Game running"
-                if (message.HasField("seconds")):
-                    status += " ({} second(s) left)".format(message.seconds)
+        if (OrwellConnection.all_connections):
+            # print ("_handle_game_state")
+            message = pb_server_game.GameState()
+            message.ParseFromString(payload)
+            if (message.HasField("winner")):
+                status = "Game won by team " + message.winner
             else:
-                status = "Game NOT running"
-        print(status)
+                if (message.playing):
+                    status = "Game running"
+                    if (message.HasField("seconds")):
+                        status += " ({} second(s) left)".format(
+                            message.seconds)
+                else:
+                    status = "Game NOT running"
+            # print(status)
+            new_items = []
+            items = []
+            for item in message.items:
+                item_wrapper = orwell.proxy.item.Item(item)
+                if (item_wrapper.name in self._items):
+                    items.append(
+                        {"name": item_wrapper.name,
+                         "status": item_wrapper.short_status})
+                else:
+                    self._items.add(item_wrapper.name)
+                    new_items.append(item_wrapper.name)
+            dico = {"status": status}
+            if (new_items):
+                print("new_items = " + str(new_items))
+                dico["new_items"] = new_items
+            if (items):
+                dico["items"] = items
+            sent = False
+            for connection in OrwellConnection.all_connections:
+                connection.send(json.dumps(dico))
+                sent = True
+            if (not sent):
+                print("message not sent")
+
+    def _handle_player_state(self, payload):
+        # WIP
+        message = pb_server_game.PlayerState()
+        message.ParseFromString(payload)
+        if (not message.HasField("item")):
+            return
+        item = message.item
+        capture_status = orwell.proxy.item.Item(item).capture_status
+        print(capture_status)
         for connection in OrwellConnection.all_connections:
-            connection.send(json.dumps({"status": status}))
+            connection.send(json.dumps({"capture_status": capture_status}))
 
     def _build_hello(self):
         pb_message = pb_controller.Hello()
@@ -169,15 +219,39 @@ class MainHandler(tornado.web.RequestHandler):
             fire_weapon1 = True
         elif ("FIRE2" == data):
             fire_weapon2 = True
-        pb_input = pb_controller.Input()
-        pb_input.move.left = left
-        pb_input.move.right = right
-        pb_input.fire.weapon1 = fire_weapon1
-        pb_input.fire.weapon2 = fire_weapon2
-        payload = pb_input.SerializeToString()
-        message = self._routing_id + ' Input ' + payload
-        # self._subscribe_stream.send(hello)
-        self._push_stream.send(message)
+        elif (data.startswith(MainHandler.JOYSTICK_CREATE)):
+            info = data[len(MainHandler.JOYSTICK_CREATE):]
+            index, _, joystick_type = info.partition(' ')
+            index = int(index)
+            self._joysticks[index] = orwell.proxy.input.Joystick(
+                0.2,
+                joystick_type)
+        elif (data.startswith(MainHandler.JOYSTICK_PREFIX)):
+            info = data[len(MainHandler.JOYSTICK_PREFIX):]
+            index, _, str_dico = info.partition(' ')
+            index = int(index)
+            self._joysticks[index].process(str_dico)
+            left = self._joysticks[index].left
+            right = self._joysticks[index].right
+            fire_weapon1 = self._joysticks[index].fire_weapon1
+            fire_weapon2 = self._joysticks[index].fire_weapon2
+
+        if (self._last_right != right) or (self._last_left != left) or \
+                (self._last_fire_weapon1 != fire_weapon1) or \
+                (self._last_fire_weapon2 != fire_weapon2):
+            self._last_right = right
+            self._last_left = left
+            self._last_fire_weapon1 = fire_weapon1
+            self._last_fire_weapon2 = fire_weapon2
+            pb_input = pb_controller.Input()
+            pb_input.move.left = left
+            pb_input.move.right = right
+            pb_input.fire.weapon1 = fire_weapon1
+            pb_input.fire.weapon2 = fire_weapon2
+            payload = pb_input.SerializeToString()
+            message = self._routing_id + ' Input ' + payload
+            # self._subscribe_stream.send(hello)
+            self._push_stream.send(message)
 
 
 class VideoHandler(tornado.web.RequestHandler):
@@ -316,16 +390,27 @@ def make_app():
         static_path=static_path)
 
 
+def get_network_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    s.connect(('<broadcast>', 0))
+    return s.getsockname()[0]
+
+
 class Broadcast(object):
     def __init__(self, port=9080, retries=5, timeout=10):
         self._size = 512
         self._retries = retries
-        self._group = ('225.0.0.42', port)
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         self._socket.settimeout(timeout)
         ttl = struct.pack('b', 1)
         self._socket.setsockopt(
             socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
+        broadcast = get_network_ip().split('.')
+        broadcast = '.'.join(broadcast[:-1]) + '.255'
+        self._group = (broadcast, port)
+        print('group = ' + str(self._group))
         self._received = False
         self._data = None
         self._sender = None
@@ -342,8 +427,10 @@ class Broadcast(object):
 
     def send_one_broadcast_message(self):
         try:
+            print("before sendto")
             sent = self._socket.sendto(
                     "<broadcast>".encode("ascii"), self._group)
+            print("after sendto ; " + repr(sent))
             while not self._received:
                 try:
                     self._data, self._sender = self._socket.recvfrom(
